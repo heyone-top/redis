@@ -4797,8 +4797,15 @@ static int clusterManagerLoadInfoFromNode(clusterManagerNode *node) {
         while ((ln = listNext(&li)) != NULL) {
             clusterManagerNode *friend = ln->value;
             if (!friend->ip || !friend->port) goto invalid_friend;
-            if (!friend->context && !clusterManagerNodeConnect(friend))
+	    if (!friend->context && !clusterManagerNodeConnect(friend)) {
+                if (friend->flags & (CLUSTER_MANAGER_FLAG_NOADDR |
+                                     CLUSTER_MANAGER_FLAG_DISCONNECT |
+                                     CLUSTER_MANAGER_FLAG_FAIL)) {
+                    listAddNodeTail(cluster_manager.nodes, friend);
+                    continue;
+                }
                 goto invalid_friend;
+            }
             e = NULL;
             if (clusterManagerNodeLoadInfo(friend, 0, &e)) {
                 if (friend->flags & (CLUSTER_MANAGER_FLAG_NOADDR |
@@ -4962,6 +4969,11 @@ static int clusterManagerIsConfigConsistent(void) {
     listRewind(cluster_manager.nodes, &li);
     while ((ln = listNext(&li)) != NULL) {
         clusterManagerNode *node = ln->value;
+        if (node->context ==NULL && node->flags & (CLUSTER_MANAGER_FLAG_NOADDR |
+                                                   CLUSTER_MANAGER_FLAG_DISCONNECT |
+                                                   CLUSTER_MANAGER_FLAG_FAIL)) {
+             continue;
+        }
         sds cfg = clusterManagerGetConfigSignature(node);
         if (cfg == NULL) {
             consistent = 0;
@@ -6600,6 +6612,11 @@ static int clusterManagerCommandDeleteNode(int argc, char **argv) {
     while ((ln = listNext(&li)) != NULL) {
         clusterManagerNode *n = ln->value;
         if (n == node) continue;
+	if (n->flags & (CLUSTER_MANAGER_FLAG_NOADDR |
+                        CLUSTER_MANAGER_FLAG_DISCONNECT |
+                        CLUSTER_MANAGER_FLAG_FAIL)) {
+            continue;
+        }
         if (n->replicate && !strcasecmp(n->replicate, node_id)) {
             // Reconfigure the slave to replicate with some other node
             clusterManagerNode *master = clusterManagerNodeWithLeastReplicas();
@@ -6620,11 +6637,16 @@ static int clusterManagerCommandDeleteNode(int argc, char **argv) {
     }
 
     /* Finally send CLUSTER RESET to the node. */
-    clusterManagerLogInfo(">>> Sending CLUSTER RESET SOFT to the "
-                          "deleted node.\n");
-    redisReply *r = redisCommand(node->context, "CLUSTER RESET %s", "SOFT");
-    success = clusterManagerCheckRedisReply(node, r, NULL);
-    if (r) freeReplyObject(r);
+    if (node->context ==NULL  && (!(node->flags & (CLUSTER_MANAGER_FLAG_NOADDR |
+    				                   CLUSTER_MANAGER_FLAG_DISCONNECT |
+                       				   CLUSTER_MANAGER_FLAG_FAIL)))) {
+      clusterManagerLogInfo(">>> Sending CLUSTER RESET SOFT to the "
+                            "deleted node.\n");
+      redisReply *r = redisCommand(node->context, "CLUSTER RESET %s", "SOFT");
+      success = clusterManagerCheckRedisReply(node, r, NULL);
+      if (r)
+        freeReplyObject(r);
+    }
     return success;
 invalid_args:
     fprintf(stderr, CLUSTER_MANAGER_INVALID_HOST_ARG);
